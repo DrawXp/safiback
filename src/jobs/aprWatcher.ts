@@ -39,9 +39,9 @@ const state: Record<string, FeeState | undefined> = {};
 const pairs: Record<string, PairRuntime | undefined> = {};
 const watchedPairs = new Set<string>();
 
-const FLUSH_INTERVAL_MS = 50_000;
+const FLUSH_INTERVAL_MS = 250_000;
 const WINDOW_MS = 24 * 60 * 60 * 1000;
-const BUCKET_MS = 10 * 60 * 1;
+const BUCKET_MS = 10 * 60 * 1000;
 
 
 let currentDay = currentDayString();

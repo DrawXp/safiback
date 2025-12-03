@@ -34,7 +34,7 @@ async function deleteSecret(roundId: number) {
 
 export function startLuckWatcher() {
   if (!LUCK_ADDR) {
-    lwarn("SAFILUCK vazio; watcher desativado");
+    lwarn("SAFILUCK empty; watcher disabled");
     return;
   }
 
@@ -73,7 +73,7 @@ export function startLuckWatcher() {
           linfo("[commit] round=%d hash=%s tx=%s", id, hash, tx.hash);
           await tx.wait();
         } catch (e: any) {
-          lerror("[commit] erro: %s", String(e?.message || e));
+          lerror("[commit] error: %s", String(e?.message || e));
         }
       }
 
@@ -91,7 +91,7 @@ export function startLuckWatcher() {
             if (!/FIN|TIME|KEEP|execution reverted/.test(msg)) lerror("[finalize] %s", msg);
           }
         } else {
-          lwarn("[finalize] segredo do round %d não encontrado", id);
+          lwarn("[finalize] secret for round %d not found", id);
         }
       }
 	  
