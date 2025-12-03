@@ -2,8 +2,7 @@ import { JsonRpcProvider, Contract } from "ethers"
 import FactoryAbi from "../abis/Factory.json"
 import PairAbi from "../abis/Pair.json"
 import ERC20Abi from "../abis/ERC20.json"
-import * as fs from "node:fs"
-import * as path from "node:path"
+import { dbQuery } from "../config/env"
 
 const RPC = process.env.RPC_PHAROS!
 const CHAIN_ID = Number(process.env.CHAIN_ID || 0)
@@ -14,10 +13,6 @@ const provider = new JsonRpcProvider(RPC, CHAIN_ID)
 const FACTORY = process.env.FACTORY as `0x${string}`
 
 const fct = new Contract(FACTORY, FactoryAbi as any, provider) as any
-
-const dataDir = path.join(__dirname, "..", "data")
-const APR_FILE_PREFIX = "apr-"
-const WINDOW_MS = 24 * 60 * 60 * 1000
 
 const APR_CACHE_TTL_MS = 10 * 60 * 1000
 type AprCacheEntry = { updatedAt: number; data: any }
@@ -34,17 +29,20 @@ type AprStoredState = {
   buckets: AprBucketStored[]
 }
 
+const WINDOW_MS = 24 * 60 * 60 * 1000
+
 function currentDayString(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
-function loadAprStateForDay(day: string): Record<string, AprStoredState> {
-  const f = path.join(dataDir, `${APR_FILE_PREFIX}${day}.json`)
-  if (!fs.existsSync(f)) return {}
+async function loadAprStateForDay(day: string): Promise<Record<string, AprStoredState>> {
   try {
-    const raw = fs.readFileSync(f, "utf8")
-    const json = JSON.parse(raw) as Record<string, AprStoredState>
-    return json
+    const { rows } = await dbQuery<{ snapshot: Record<string, AprStoredState> }>(
+      "select snapshot from apr_daily_snapshots where day = $1 limit 1",
+      [day],
+    )
+    if (!rows.length || !rows[0]?.snapshot) return {}
+    return rows[0].snapshot
   } catch {
     return {}
   }
@@ -53,7 +51,7 @@ function loadAprStateForDay(day: string): Record<string, AprStoredState> {
 async function computeLpApr(pairAddr: string) {
   const pair = pairAddr as `0x${string}`
   const day = currentDayString()
-  const data = loadAprStateForDay(day)
+  const data = await loadAprStateForDay(day)
   const key = pair.toLowerCase()
   const entry = data[key]
 

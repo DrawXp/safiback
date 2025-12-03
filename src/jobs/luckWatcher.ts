@@ -1,35 +1,35 @@
 import { Contract, Wallet, keccak256, toUtf8Bytes } from "ethers";
-import { ADDR, requireSigner, loadAbi } from "../config/env";
+import { ADDR, requireSigner, loadAbi, dbQuery } from "../config/env";
 import { log } from "../libs/logger";
 import crypto from "crypto";
-import fs from "fs";
-import path from "path";
 
 const raw = loadAbi("SAFILuck");
 const abi: any[] = (raw as any).abi ?? (raw as any);
 
 const LUCK_ADDR = ADDR.SAFILUCK;
-const DATA_DIR = path.resolve(__dirname, "../data/luck-secrets");
-
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const linfo = (...a: any[]) => log("[luckWatcher][info]", ...a);
 const lwarn = (...a: any[]) => log("[luckWatcher][warn]", ...a);
 const lerror = (...a: any[]) => log("[luckWatcher][error]", ...a);
 
-function storeSecret(roundId: number, secret: string) {
-  fs.writeFileSync(path.join(DATA_DIR, `${roundId}.txt`), secret);
+async function storeSecret(roundId: number, secret: string) {
+  await dbQuery(
+    "insert into luck_secrets (round_id, secret) values ($1, $2) on conflict (round_id) do update set secret = excluded.secret",
+    [roundId, secret],
+  );
 }
 
-function loadSecret(roundId: number): string | null {
-  const f = path.join(DATA_DIR, `${roundId}.txt`);
-  if (!fs.existsSync(f)) return null;
-  return fs.readFileSync(f, "utf8");
+async function loadSecret(roundId: number): Promise<string | null> {
+  const { rows } = await dbQuery<{ secret: string }>(
+    "select secret from luck_secrets where round_id = $1 limit 1",
+    [roundId],
+  );
+  if (!rows.length) return null;
+  return rows[0]?.secret ?? null;
 }
 
-function deleteSecret(roundId: number) {
-  const f = path.join(DATA_DIR, `${roundId}.txt`);
-  if (fs.existsSync(f)) fs.unlinkSync(f);
+async function deleteSecret(roundId: number) {
+  await dbQuery("delete from luck_secrets where round_id = $1", [roundId]);
 }
 
 export function startLuckWatcher() {
@@ -37,6 +37,7 @@ export function startLuckWatcher() {
     lwarn("SAFILUCK vazio; watcher desativado");
     return;
   }
+
   const signer: Wallet = requireSigner();
   const luck = new Contract(LUCK_ADDR, abi, signer) as any;
 
@@ -64,7 +65,9 @@ export function startLuckWatcher() {
       if (!r.commitHash || r.commitHash === "0x".padEnd(66, "0")) {
         const secret = crypto.randomBytes(32).toString("hex");
         const hash = keccak256(toUtf8Bytes(secret));
-        storeSecret(id, secret);
+
+        await storeSecret(id, secret);
+
         try {
           const tx = await luck.commit(hash);
           linfo("[commit] round=%d hash=%s tx=%s", id, hash, tx.hash);
@@ -75,13 +78,14 @@ export function startLuckWatcher() {
       }
 
       if (!r.finalized && now > Number(r.endTs)) {
-        const secret = loadSecret(id);
+        const secret = await loadSecret(id);
+
         if (secret) {
           try {
             const tx = await luck.finalize(toUtf8Bytes(secret));
             linfo("[finalize] tx=%s", tx.hash);
             await tx.wait();
-            deleteSecret(id);
+            await deleteSecret(id);
           } catch (e: any) {
             const msg = String(e?.message || e);
             if (!/FIN|TIME|KEEP|execution reverted/.test(msg)) lerror("[finalize] %s", msg);
@@ -90,7 +94,7 @@ export function startLuckWatcher() {
           lwarn("[finalize] segredo do round %d não encontrado", id);
         }
       }
-
+	  
       const lastId = id - 1;
       if (lastId > 0) {
         const lr = await luck.rounds(BigInt(lastId));

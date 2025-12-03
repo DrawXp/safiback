@@ -1,3 +1,5 @@
+import { setDefaultResultOrder } from 'node:dns';
+setDefaultResultOrder('ipv4first');
 import express from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
@@ -65,7 +67,7 @@ log("ENV loaded", {
 });
 
 const app = express();
-app.use(cors({ origin: true, credentials: true }));
+app.use(cors());
 
 const limiter = rateLimit({
   windowMs: 60 * 1000,

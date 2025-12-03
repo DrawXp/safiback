@@ -1,12 +1,25 @@
 import * as dotenv from "dotenv";
 import { ethers } from "ethers";
+import { Pool } from "pg";
 dotenv.config({ override: true });
 
 export const env = process.env;
 
+export const DATABASE_URL = String(env.DATABASE_URL || "");
+if (!DATABASE_URL) throw new Error("DATABASE_URL missing");
+
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
+export async function dbQuery<T = any>(text: string, params?: any[]): Promise<{ rows: T[] }> {
+  return pool.query(text, params) as any;
+}
+
 export const RPC_PHAROS = String(env.RPC_PHAROS);
 export const CHAIN_ID   = Number(env.CHAIN_ID || 0);
-if (!RPC_PHAROS || !CHAIN_ID) throw new Error("RPC_PHAROS/CHAIN_ID ausentes");
+if (!RPC_PHAROS || !CHAIN_ID) throw new Error("RPC_PHAROS/CHAIN_ID missing");
 
 export const provider = new ethers.JsonRpcProvider(RPC_PHAROS, CHAIN_ID);
 
@@ -18,7 +31,7 @@ function normalizePk(raw: string) {
 }
 export function requireSigner() {
   const raw = String(env.OWNER_PK || '');
-  if (!raw) throw new Error('Signer do backend ausente. Defina OWNER_PK no .env');
+  if (!raw) throw new Error('Backend signer missing. Define OWNER_PK in .env');
   const pk = normalizePk(raw);
   return new ethers.Wallet(pk, provider);
 }

@@ -1,8 +1,5 @@
 import { Contract, Interface, Log } from "ethers";
-import * as fs from "node:fs";
-import * as path from "node:path";
-
-import { provider as baseProvider, ADDR, loadAbi } from "../config/env";
+import { provider as baseProvider, ADDR, loadAbi, dbQuery } from "../config/env";
 import { log as baseLog } from "../libs/logger";
 
 const PairAbi = loadAbi("Pair");
@@ -42,11 +39,10 @@ const state: Record<string, FeeState | undefined> = {};
 const pairs: Record<string, PairRuntime | undefined> = {};
 const watchedPairs = new Set<string>();
 
-const dataDir = path.join(__dirname, "..", "data");
-const FILE_PREFIX = "apr-";
-const FLUSH_INTERVAL_MS = 150_000;
+const FLUSH_INTERVAL_MS = 50_000;
 const WINDOW_MS = 24 * 60 * 60 * 1000;
-const BUCKET_MS = 10 * 60 * 1000;
+const BUCKET_MS = 10 * 60 * 1;
+
 
 let currentDay = currentDayString();
 let lastFlush = 0;
@@ -64,50 +60,26 @@ function currentDayString(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function ensureDir() {
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-  }
-}
-
-function fileForDay(day: string) {
-  return path.join(dataDir, `${FILE_PREFIX}${day}.json`);
-}
-
-function stepFor(txCount: number): number {
-  if (txCount > 50_000) return 10;
-  if (txCount > 5_000) return 5;
-  if (txCount > 500) return 3;
-  return 1;
-}
-
-function cleanupOldFiles(dayKeep: string) {
-  ensureDir();
-  const keepName = `${FILE_PREFIX}${dayKeep}.json`;
+async function cleanupOldRows(dayKeep: string) {
   try {
-    for (const name of fs.readdirSync(dataDir)) {
-      if (!name.startsWith(FILE_PREFIX)) continue;
-      if (name === keepName) continue;
-      const full = path.join(dataDir, name);
-      try {
-        fs.unlinkSync(full);
-        log("cleanup", "deleted", { file: name });
-      } catch (e: any) {
-        log("cleanup", "unlinkError", { file: name, error: String(e?.message || e) });
-      }
-    }
+    await dbQuery("delete from apr_daily_snapshots where day <> $1", [dayKeep]);
+    log("cleanup", "deleted", { dayKeep });
   } catch (e: any) {
     log("cleanup", "error", { dayKeep, error: String(e?.message || e) });
   }
 }
 
-function loadDay(day: string) {
-  ensureDir();
-  const f = fileForDay(day);
-  if (!fs.existsSync(f)) return;
+async function loadDay(day: string) {
   try {
-    const raw = fs.readFileSync(f, "utf8");
-    const json = JSON.parse(raw) as Record<string, StoredFeeState>;
+    const { rows } = await dbQuery<{ snapshot: Record<string, StoredFeeState> }>(
+      "select snapshot from apr_daily_snapshots where day = $1 limit 1",
+      [day],
+    );
+    if (!rows.length || !rows[0]?.snapshot) {
+      log("loadDay", "empty", { day });
+      return;
+    }
+    const json = rows[0].snapshot;
     for (const [pair, v] of Object.entries(json)) {
       if (!v || !Array.isArray(v.buckets)) continue;
       const buckets: Bucket[] = [];
@@ -140,14 +112,13 @@ function pruneOldBuckets(s: FeeState, nowMs: number) {
   s.buckets = kept;
 }
 
-function flush() {
+async function flush() {
   const dayNow = currentDayString();
   if (dayNow !== currentDay) {
-    cleanupOldFiles(dayNow);
+    await cleanupOldRows(dayNow);
     currentDay = dayNow;
   }
 
-  ensureDir();
   const out: Record<string, StoredFeeState> = {};
   for (const [pair, sRaw] of Object.entries(state)) {
     const s = sRaw;
@@ -160,9 +131,12 @@ function flush() {
     }));
     out[pair] = { buckets };
   }
-  const f = fileForDay(currentDay);
+
   try {
-    fs.writeFileSync(f, JSON.stringify(out, null, 2), "utf8");
+    await dbQuery(
+      "insert into apr_daily_snapshots (day, snapshot) values ($1, $2::jsonb) on conflict (day) do update set snapshot = excluded.snapshot",
+      [currentDay, JSON.stringify(out)],
+    );
     lastFlush = Date.now();
     log("flush", "ok", { day: currentDay, pairs: Object.keys(out).length });
   } catch (e: any) {
@@ -171,7 +145,7 @@ function flush() {
 }
 
 async function setupPairs() {
-  if (!baseProvider) throw new Error("aprWatcher: provider ausente");
+  if (!baseProvider) throw new Error("aprWatcher: provider missing");
 
   const len: bigint = await factory.allPairsLength();
   const n = Number(len);
@@ -217,6 +191,12 @@ async function ensureFeeBpsFor(key: string, pairAddr: `0x${string}`): Promise<bi
     pr.feeBps = 30n;
     return 30n;
   }
+}
+
+function stepFor(count: number): number {
+  if (count < 100) return 1;
+  if (count < 1000) return 10;
+  return 50;
 }
 
 async function processLogForPair(key: string, pairAddr: `0x${string}`, logEntry: Log) {
@@ -271,7 +251,7 @@ async function processLogForPair(key: string, pairAddr: `0x${string}`, logEntry:
 
     const now = Date.now();
     if (now - lastFlush > FLUSH_INTERVAL_MS) {
-      flush();
+      await flush();
     }
   } catch (e: any) {
     log("process", "error", { pair: pairAddr, error: String(e?.message || e) });
@@ -313,7 +293,7 @@ async function handleBlock(n: bigint) {
 
   const now = Date.now();
   if (now - lastFlush > FLUSH_INTERVAL_MS) {
-    flush();
+    await flush();
   }
 }
 
@@ -332,10 +312,10 @@ export async function startAprWatcher() {
     return;
   }
 
-  if (!baseProvider) throw new Error("aprWatcher: provider ausente");
+  if (!baseProvider) throw new Error("aprWatcher: provider missing");
 
   currentDay = currentDayString();
-  loadDay(currentDay);
+  await loadDay(currentDay);
 
   const startBlock = await baseProvider.getBlockNumber();
   lastBlockScanned = BigInt(startBlock);
