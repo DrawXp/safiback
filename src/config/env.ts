@@ -1,13 +1,24 @@
-import { setDefaultResultOrder } from 'node:dns';
-setDefaultResultOrder('ipv4first');
 import * as dotenv from "dotenv";
 import { ethers } from "ethers";
 import { Pool } from "pg";
+import dns from "dns";
+
+const originalLookup = dns.lookup;
+(dns as any).lookup = (hostname: string, options: any, callback: any) => {
+  if (typeof options === 'function') {
+    callback = options;
+    options = {};
+  }
+  options = options || {};
+  options.family = 4;
+  return originalLookup(hostname, options, callback);
+};
+
 dotenv.config({ override: true });
 
 export const env = process.env;
 
-export const DATABASE_URL = String(env.DATABASE_URL || "");
+export const DATABASE_URL = String(env.DATABASE_URL || "").trim();
 if (!DATABASE_URL) throw new Error("DATABASE_URL missing");
 
 const pool = new Pool({
@@ -31,6 +42,7 @@ function normalizePk(raw: string) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(pk)) throw new Error('Bad OWNER_PK format');
   return pk;
 }
+
 export function requireSigner() {
   const raw = String(env.OWNER_PK || '');
   if (!raw) throw new Error('Backend signer missing. Define OWNER_PK in .env');
