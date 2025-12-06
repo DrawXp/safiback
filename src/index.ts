@@ -65,6 +65,7 @@ log("ENV loaded", {
 });
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(cors());
 
 const limiter = rateLimit({
