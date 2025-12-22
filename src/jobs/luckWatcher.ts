@@ -66,14 +66,25 @@ export function startLuckWatcher() {
         const secret = crypto.randomBytes(32).toString("hex");
         const hash = keccak256(toUtf8Bytes(secret));
 
-        await storeSecret(id, secret);
+        try {
+          await storeSecret(id, secret);
+        } catch (dbErr: any) {
+          lerror("[commit] db save error: %s", dbErr?.message || dbErr);
+          return setTimeout(loop, 5000);
+        }
+
+        const verify = await loadSecret(id);
+        if (verify !== secret) {
+          lerror("[commit] db verification failed for round %d", id);
+          return setTimeout(loop, 5000);
+        }
 
         try {
           const tx = await luck.commit(hash);
           linfo("[commit] round=%d hash=%s tx=%s", id, hash, tx.hash);
           await tx.wait();
         } catch (e: any) {
-          lerror("[commit] error: %s", String(e?.message || e));
+          lerror("[commit] tx error: %s", String(e?.message || e));
         }
       }
 
@@ -94,7 +105,7 @@ export function startLuckWatcher() {
           lwarn("[finalize] secret for round %d not found", id);
         }
       }
-	  
+
       const lastId = id - 1;
       if (lastId > 0) {
         const lr = await luck.rounds(BigInt(lastId));
