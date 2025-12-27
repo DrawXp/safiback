@@ -12,9 +12,9 @@ const linfo = (...a: any[]) => log("[luckWatcher][info]", ...a);
 const lwarn = (...a: any[]) => log("[luckWatcher][warn]", ...a);
 const lerror = (...a: any[]) => log("[luckWatcher][error]", ...a);
 
-async function storeSecret(roundId: number, secret: string) {
+async function insertSecretSafe(roundId: number, secret: string) {
   await dbQuery(
-    "insert into luck_secrets (round_id, secret) values ($1, $2) on conflict (round_id) do update set secret = excluded.secret",
+    "insert into luck_secrets (round_id, secret) values ($1, $2) on conflict (round_id) do nothing",
     [roundId, secret],
   );
 }
@@ -63,21 +63,27 @@ export function startLuckWatcher() {
       const id = Number(await luck.currentRoundId());
 
       if (!r.commitHash || r.commitHash === "0x".padEnd(66, "0")) {
-        const secret = crypto.randomBytes(32).toString("hex");
+        let secret = await loadSecret(id);
+
+        if (!secret) {
+          const newSecret = crypto.randomBytes(32).toString("hex");
+
+          try {
+            await insertSecretSafe(id, newSecret);
+          } catch (dbErr: any) {
+            lerror("[commit] db save error: %s", dbErr?.message || dbErr);
+            return setTimeout(loop, 5000);
+          }
+
+          secret = await loadSecret(id);
+        }
+
+        if (!secret) {
+          lerror("[commit] Critical: Failed to load secret after generation attempt for round %d", id);
+          return setTimeout(loop, 5000);
+        }
+
         const hash = keccak256(toUtf8Bytes(secret));
-
-        try {
-          await storeSecret(id, secret);
-        } catch (dbErr: any) {
-          lerror("[commit] db save error: %s", dbErr?.message || dbErr);
-          return setTimeout(loop, 5000);
-        }
-
-        const verify = await loadSecret(id);
-        if (verify !== secret) {
-          lerror("[commit] db verification failed for round %d", id);
-          return setTimeout(loop, 5000);
-        }
 
         try {
           const tx = await luck.commit(hash);
@@ -89,20 +95,45 @@ export function startLuckWatcher() {
       }
 
       if (!r.finalized && now > Number(r.endTs)) {
-        const secret = await loadSecret(id);
+        const cw = await getClaimWindowSec();
+        const expirationTime = Number(r.endTs) + cw;
 
-        if (secret) {
+        if (now > expirationTime) {
           try {
-            const tx = await luck.finalize(toUtf8Bytes(secret));
-            linfo("[finalize] tx=%s", tx.hash);
+            linfo("[finalize] round %d expired without reveal, forcing rollover", id);
+            const tx = await luck.rolloverIfExpired(BigInt(id));
+            linfo("[rollover-forced] id=%d tx=%s", id, tx.hash);
             await tx.wait();
             await deleteSecret(id);
           } catch (e: any) {
-            const msg = String(e?.message || e);
-            if (!/FIN|TIME|KEEP|execution reverted/.test(msg)) lerror("[finalize] %s", msg);
+            lerror("[rollover-forced] error: %s", String(e?.message || e));
           }
         } else {
-          lwarn("[finalize] secret for round %d not found", id);
+          const secret = await loadSecret(id);
+          let hashMatch = false;
+
+          if (secret) {
+            const calculatedHash = keccak256(toUtf8Bytes(secret));
+            if (calculatedHash === r.commitHash) {
+              hashMatch = true;
+            } else {
+              lwarn("[finalize] secret mismatch for round %d. DB=%s Chain=%s. Waiting for expiration.", id, calculatedHash, r.commitHash);
+            }
+          }
+
+          if (hashMatch && secret) {
+            try {
+              const tx = await luck.finalize(toUtf8Bytes(secret));
+              linfo("[finalize] tx=%s", tx.hash);
+              await tx.wait();
+              await deleteSecret(id);
+            } catch (e: any) {
+              const msg = String(e?.message || e);
+              if (!/FIN|TIME|KEEP|execution reverted/.test(msg)) lerror("[finalize] %s", msg);
+            }
+          } else if (!secret) {
+            lwarn("[finalize] secret for round %d not found in DB, waiting for expiration", id);
+          }
         }
       }
 
